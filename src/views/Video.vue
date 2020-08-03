@@ -1,26 +1,52 @@
 <template>
     <div>
-        <div v-show="loading">
+        <div v-show="loading" class="loading">
             Loading...
         </div>
         <div v-show="!loading">
-            <div id="participants" />
+            <div
+                id="participants"
+                class="participants"
+            >
+                <div class="message">
+                    {{ message }}
+                </div>
+            </div>
+            <div class="controls">
+                <button class="toggle-mute" type="button" @click="toggleMute()">
+                    Mute
+                </button>
+                <button type="button" @click="disconnect()">
+                    Disconnect
+                </button>
+            </div>
         </div>
     </div>
 </template>
 
 <script>
 import { isMobile } from "../utils/helpers";
-import { connect } from "twilio-video";
+import { connect, createLocalVideoTrack } from "twilio-video";
 
 export default {
     name: "Video",
     data() {
         return {
             loading: true,
+            messages: {
+                waiting: "Waiting for participant...",
+                disconnect: "Participant left the call."
+            },
+            messageState: "waiting",
+            room: null,
             roomName: this.$route.query.room,
             userToken: this.$route.query.sid
         };
+    },
+    computed: {
+        message() {
+            return this.messages[this.messageState];
+        }
     },
     created() {
         const connectOptions = {
@@ -38,12 +64,13 @@ export default {
          * @param participant - the Participant whose media container is to be set up
          * @param room - the Room that the Participant joined
          */
-        setupParticipantContainer(participant, room) {
+        setupParticipantContainer(participant, room, className) {
             const { identity, sid } = participant;
 
             // Add a container for the Participant's media.
             const container = document.createElement("div");
             container.id = sid;
+            container.className = className;
             container.setAttribute("data-identity", identity);
 
             const audio = document.createElement("audio");
@@ -60,6 +87,10 @@ export default {
             container.appendChild(audio);
             container.appendChild(video);
 
+            // Remove waiting message if the user is not local
+            if (className != "local") {
+                document.querySelector(".message").style.display = "none";
+            }
             // Add the Participant's container to the DOM.
             document.querySelector("#participants").appendChild(container);
         },
@@ -90,9 +121,9 @@ export default {
          * @param participant - the Participant
          * @param room - the Room that the Participant joined
          */
-        participantConnected(participant, room) {
+        participantConnected(participant, room, className) {
             // Set up the Participant's media container.
-            this.setupParticipantContainer(participant, room);
+            this.setupParticipantContainer(participant, room, className);
 
             // Handle the TrackPublications already published by the Participant.
             participant.tracks.forEach(publication => {
@@ -113,6 +144,7 @@ export default {
             // Remove the Participant's media container.
             const participantContainer = document.querySelector(`#${participant.sid}`);
             document.querySelector("#participants").removeChild(participantContainer);
+            this.setMessage("disconnect");
         },
         /**
          * Handle to the TrackPublication's media.
@@ -135,6 +167,26 @@ export default {
                 this.detachTrack(track, participant);
             });
         },
+        toggleMute() {
+            const toggleButton = document.querySelector(".toggle-mute");
+            this.room.localParticipant.audioTracks.forEach(publication => {
+                if (publication.isTrackEnabled) {
+                    toggleButton.innerHTML = "Unmute";
+                    publication.track.disable();
+                } else {
+                    toggleButton.innerHTML = "Mute";
+                    publication.track.enable();
+                }
+            });
+        },
+        disconnect() {
+            this.setMessage("disconnect");
+            this.room.disconnect();
+        },
+        setMessage(messageState) {
+            this.messageState = messageState;
+            document.querySelector(".message").style.display = "flex";
+        },
         /**
          * Join a Room.
          * @param token - the AccessToken used to join a Room
@@ -144,18 +196,22 @@ export default {
             // Join to the Room with the given AccessToken and ConnectOptions.
             const room = await connect(token, connectOptions);
             this.loading = false;
+            this.room = room;
 
             // Save the LocalVideoTrack.
             let localVideoTrack = Array.from(room.localParticipant.videoTracks.values())[0].track;
 
+            // Handle the LocalParticipant's media.
+            this.participantConnected(room.localParticipant, room, "local");
+
             // Subscribe to the media published by RemoteParticipants already in the Room.
             room.participants.forEach(participant => {
-                this.participantConnected(participant, room);
+                this.participantConnected(participant, room, "participant");
             });
 
             // Subscribe to the media published by RemoteParticipants joining the Room later.
             room.on("participantConnected", participant => {
-                this.participantConnected(participant, room);
+                this.participantConnected(participant, room, "participant");
             });
 
             // Handle a disconnected RemoteParticipant.
@@ -204,13 +260,13 @@ export default {
                     // Stop the LocalVideoTrack.
                     localVideoTrack.stop();
 
+                    // Handle the disconnected LocalParticipant.
+                    this.participantDisconnected(room.localParticipant, room);
+
                     // Handle the disconnected RemoteParticipants.
                     room.participants.forEach(participant => {
                         this.participantDisconnected(participant, room);
                     });
-
-                    // Clear the Room reference used for debugging from the JavaScript console.
-                    window.room = null;
 
                     if (error) {
                         // Reject the Promise with the TwilioError so that the Room selection
@@ -227,3 +283,40 @@ export default {
     }
 }
 </script>
+
+<style lang="scss">
+.loading,
+.message {
+    align-items: center;
+    display: flex;
+    font-size: 36px;
+    height: 100vh;
+    justify-content: center;
+}
+
+.participants {
+    .local {
+        video {
+            position: absolute;
+            right: 25px;
+            top: 25px;
+            width: 20%;
+        }
+    }
+
+    .participant {
+        video {
+            height: 100vh;
+            width: 100vw;
+        }
+    }
+}
+
+.controls {
+    bottom: 50px;
+    left: 50%;
+    position: absolute;
+    transform: translateX(-50%);
+    z-index: 25;
+}
+</style>
